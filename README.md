@@ -1,1 +1,1 @@
-# Proyecto-2-L-pez-y-Gamarro
+# Proyecto-2-López-y-Gamarro
