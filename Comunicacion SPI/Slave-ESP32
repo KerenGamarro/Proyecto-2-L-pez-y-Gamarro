@@ -1,0 +1,49 @@
+#include <Arduino.h>
+#include <ESP32SPISlave.h>
+
+#define LED 2
+
+ESP32SPISlave slave;
+
+static constexpr uint32_t BUFFER_SIZE = 32;
+uint8_t spi_slave_tx_buf[BUFFER_SIZE];
+uint8_t spi_slave_rx_buf[BUFFER_SIZE];
+uint8_t cmd = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
+
+  // Configurar esclavo SPI en bus VSPI (CS=5, CLK=18, MOSI=23, MISO=19)
+  slave.setDataMode(SPI_MODE0);
+  slave.setQueueSize(1);
+  slave.begin(VSPI);
+
+  memset(spi_slave_tx_buf, 0, BUFFER_SIZE);
+  memset(spi_slave_rx_buf, 0, BUFFER_SIZE);
+
+  Serial.println("ESP32 SPI Slave listo.");
+}
+
+void loop() {
+  // Espera la transacción desde el maestro
+  slave.wait(spi_slave_rx_buf, spi_slave_tx_buf, BUFFER_SIZE);
+
+  while (slave.available()) {
+    cmd = spi_slave_rx_buf[0];
+    Serial.print("Dato recibido: ");
+    Serial.println(cmd);
+    slave.pop();
+  }
+
+  if (cmd == 1) {
+    digitalWrite(LED, HIGH);
+    Serial.println("LED ENCENDIDO");
+  } else if (cmd == 0) {
+    digitalWrite(LED, LOW);
+    Serial.println("LED APAGADO");
+  }
+}
