@@ -1,0 +1,276 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : STM32 Master SPI - Controla LED del ESP32
+  * @description    : Ejemplo de Pablo para lograr la comunicación SPI, el boton de la nucleo enciende el led del ESP32
+  ******************************************************************************
+  */
+#include "main.h"
+#include "string.h"
+#include "stdio.h"
+
+/* USER CODE END Header */
+
+/* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;      // Handle para SPI1 (comunicación con ESP32)
+UART_HandleTypeDef huart2;    // Handle para UART2 (debug por serial)
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_USART2_UART_Init(void);
+
+/* USER CODE BEGIN PV */
+uint8_t ledState = 0;         // Estado actual del LED (0=apagado, 1=encendido)
+uint8_t btnLastState = 0;     // Estado previo del botón (para detección de flancos)
+uint8_t btnCurrentState = 0;  // Estado actual del botón
+/* USER CODE END PV */
+
+int main(void)
+{
+  /* Inicialización de HAL (Hardware Abstraction Layer) */
+  HAL_Init();
+
+  /* Configuración del reloj del sistema */
+  SystemClock_Config();
+
+  /* Inicialización de periféricos */
+  MX_GPIO_Init();      // Configura los pines GPIO (botón, LED, CS)
+  MX_SPI1_Init();      // Configura el periférico SPI1
+  MX_USART2_UART_Init(); // Configura UART2 para debug
+
+  /* Mensaje inicial por UART para confirmar que el sistema está listo */
+  HAL_UART_Transmit(&huart2, (uint8_t*)"STM32 SPI Master Ready\r\n", 24, HAL_MAX_DELAY);
+  HAL_Delay(100);  // Pausa de 100ms para estabilizar
+
+  /* Loop principal infinito */
+  while (1)
+  {
+    /* ========== LECTURA DEL BOTÓN ========== */
+    // Lee el estado actual del botón USER (PC13)
+    btnCurrentState = HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin);
+
+    /* ========== DETECCIÓN DE FLANCO DE SUBIDA ========== */
+    // Solo actúa cuando el botón pasa de NO presionado (0) a presionado (1)
+    // Esto evita múltiples envíos mientras el botón está presionado
+    if (btnCurrentState == GPIO_PIN_SET && btnLastState == GPIO_PIN_RESET)
+    {
+      /* Antirrebote: espera 50ms para confirmar que no es ruido */
+      HAL_Delay(50);
+
+      /* Verifica que el botón sigue presionado después del antirrebote */
+      if (HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin) == GPIO_PIN_SET)
+      {
+        /* ========== TOGGLE DEL ESTADO DEL LED ========== */
+        // Invierte el estado: si estaba en 0 pasa a 1, y viceversa
+        ledState = !ledState;
+
+        /* ========== TRANSMISIÓN SPI AL ESP32 ========== */
+        // Paso 1: Poner CS (Chip Select) en bajo para iniciar comunicación
+        HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_RESET);
+
+        // Paso 2: Pequeña pausa para dar tiempo al ESP32 a detectar CS bajo
+        HAL_Delay(1);
+
+        // Paso 3: Transmitir un byte con el comando (0 o 1) al ESP32
+        HAL_SPI_Transmit(&hspi1, &ledState, 1, 100);
+
+        // Paso 4: Pequeña pausa para asegurar que se completó la transmisión
+        HAL_Delay(1);
+
+        // Paso 5: Poner CS en alto para finalizar la comunicación
+        HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_SET);
+
+        /* ========== LED INDICADOR LOCAL ========== */
+        // Actualiza el LED local (PC7) en la NUCLEO para reflejar el estado
+        HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
+        /* ========== MENSAJE DE DEBUG POR UART ========== */
+        // Envía un mensaje por serial indicando el comando enviado
+        char msg[40];
+        sprintf(msg, "Comando SPI enviado: %d\r\n", ledState);
+        HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+      }
+    }
+
+    /* ========== ACTUALIZACIÓN DEL ESTADO ANTERIOR ========== */
+    // Guarda el estado actual como el estado anterior para la próxima iteración
+    btnLastState = btnCurrentState;
+
+    /* Pausa corta para no saturar el procesador con lecturas continuas */
+    HAL_Delay(10);
+  }
+}
+
+/* ============================================================================ */
+/* CONFIGURACIÓN DEL RELOJ DEL SISTEMA                                          */
+/* ============================================================================ */
+/**
+  * @brief  Configura el reloj del sistema
+  * @note   Usa el oscilador interno HSI (16 MHz) sin PLL
+  *         Voltaje regulado a escala 3 para bajo consumo
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /* Habilita el reloj del módulo de gestión de energía */
+  __HAL_RCC_PWR_CLK_ENABLE();
+
+  /* Configura el regulador de voltaje en escala 3 (bajo consumo) */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+  /* Configura el oscilador HSI (High Speed Internal - 16 MHz) */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;  // Sin PLL
+  HAL_RCC_OscConfig(&RCC_OscInitStruct);
+
+  /* Configura los divisores de reloj para los buses del sistema */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|
+                                RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;  // SYSCLK = HSI (16 MHz)
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;      // AHB = 16 MHz
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;       // APB1 = 16 MHz
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;       // APB2 = 16 MHz
+  HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
+}
+
+/* ============================================================================ */
+/* INICIALIZACIÓN DE SPI1                                                       */
+/* ============================================================================ */
+/**
+  * @brief  Configura el periférico SPI1 como maestro
+  * @note   Configuración:
+  *         - Modo: Full-Duplex Master
+  *         - Tamaño de dato: 8 bits
+  *         - Polaridad de reloj (CPOL): Low (0)
+  *         - Fase de reloj (CPHA): 1 Edge (0) -> SPI_MODE0
+  *         - Velocidad: ~250 kHz (prescaler 64)
+  *         - MSB primero
+  */
+static void MX_SPI1_Init(void)
+{
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;              // STM32 es el maestro
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;    // Full-duplex (MOSI y MISO)
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;        // Datos de 8 bits
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;      // CPOL = 0 (reloj en bajo cuando inactivo)
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;          // CPHA = 0 (muestreo en primer flanco)
+  hspi1.Init.NSS = SPI_NSS_SOFT;                  // CS manejado por software (PA9)
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64; // 16MHz / 64 = 250 kHz
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;         // Bit más significativo primero
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;         // Sin modo TI
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE; // Sin CRC
+  HAL_SPI_Init(&hspi1);
+}
+
+/* ============================================================================ */
+/* INICIALIZACIÓN DE USART2                                                     */
+/* ============================================================================ */
+/**
+  * @brief  Configura USART2 para comunicación serial (debug)
+  * @note   Configuración estándar:
+  *         - Baud rate: 115200
+  *         - 8 bits de datos, sin paridad, 1 bit de stop (8N1)
+  */
+static void MX_USART2_UART_Init(void)
+{
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;                  // Velocidad de transmisión
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;    // 8 bits por palabra
+  huart2.Init.StopBits = UART_STOPBITS_1;         // 1 bit de stop
+  huart2.Init.Parity = UART_PARITY_NONE;          // Sin paridad
+  huart2.Init.Mode = UART_MODE_TX_RX;             // Transmisión y recepción
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;    // Sin control de flujo
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16; // Sobremuestreo x16
+  HAL_UART_Init(&huart2);
+}
+
+/* ============================================================================ */
+/* INICIALIZACIÓN DE GPIO                                                       */
+/* ============================================================================ */
+/**
+  * @brief  Configura los pines GPIO necesarios para la aplicación
+  * @note   Pines configurados:
+  *         - PC7: LED local (salida)
+  *         - PC13: Botón USER (entrada)
+  *         - PA9: Chip Select del ESP32 (salida, inicia en HIGH)
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* ========== HABILITAR RELOJES DE LOS PUERTOS GPIO ========== */
+  __HAL_RCC_GPIOC_CLK_ENABLE();  // Habilita reloj del puerto C
+  __HAL_RCC_GPIOA_CLK_ENABLE();  // Habilita reloj del puerto A
+
+  /* ========== CONFIGURAR LED LOCAL (PC7) ========== */
+  // Inicializa el LED apagado
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+
+  GPIO_InitStruct.Pin = LED_Pin;                  // Pin PC7
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;     // Salida push-pull
+  GPIO_InitStruct.Pull = GPIO_NOPULL;             // Sin resistencia pull-up/down
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;    // Velocidad baja (suficiente para LED)
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+
+  /* ========== CONFIGURAR BOTÓN USER (PC13) ========== */
+  GPIO_InitStruct.Pin = BTN_Pin;                  // Pin PC13
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;         // Entrada digital
+  GPIO_InitStruct.Pull = GPIO_NOPULL;             // Sin pull-up/down (botón tiene pull-down externo)
+  HAL_GPIO_Init(BTN_GPIO_Port, &GPIO_InitStruct);
+
+  /* ========== CONFIGURAR CHIP SELECT ESP32 (PA9) ========== */
+  // Inicializa CS en HIGH (inactivo) según protocolo SPI
+  HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_SET);
+
+  GPIO_InitStruct.Pin = ESP32_CS_Pin;             // Pin PA9
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;     // Salida push-pull
+  GPIO_InitStruct.Pull = GPIO_NOPULL;             // Sin pull-up/down
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;   // Velocidad alta (importante para SPI)
+  HAL_GPIO_Init(ESP32_CS_GPIO_Port, &GPIO_InitStruct);
+}
+
+/* ============================================================================ */
+/* NOTA: Las funciones HAL_SPI_MspInit y HAL_UART_MspInit están definidas      */
+/*       en stm32f4xx_hal_msp.c, generado automáticamente por CubeMX.          */
+/*       Estas funciones configuran los pines AF (Alternate Function) y        */
+/*       habilitan los relojes de los periféricos.                             */
+/* ============================================================================ */
+
+/* ============================================================================ */
+/* MANEJADOR DE ERRORES                                                         */
+/* ============================================================================ */
+/**
+  * @brief  Función llamada cuando ocurre un error
+  * @note   Deshabilita interrupciones y entra en loop infinito
+  */
+void Error_Handler(void)
+{
+  __disable_irq();  // Deshabilita todas las interrupciones
+  while (1)         // Loop infinito
+  {
+    // El sistema queda bloqueado aquí en caso de error
+  }
+}
+
+/* ============================================================================ */
+/* FUNCIÓN DE ASSERT (solo en modo DEBUG)                                      */
+/* ============================================================================ */
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reporta el nombre del archivo y línea donde falló un assert
+  * @param  file: puntero al nombre del archivo
+  * @param  line: número de línea donde falló el assert
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  // Implementar código para reportar el error si es necesario
+}
+#endif
+
