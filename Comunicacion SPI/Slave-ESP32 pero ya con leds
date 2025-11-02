@@ -1,0 +1,111 @@
+/**
+ * ============================================================================
+ * ESP32 - Esclavo SPI con 3 LEDs (SIMPLE)
+ * ============================================================================
+ * Conexiones SPI:
+ * - GPIO23 (MOSI) ← STM32 PA7
+ * - GPIO19 (MISO) → STM32 PA6
+ * - GPIO18 (SCK)  ← STM32 PA5
+ * - GPIO5  (CS)   ← STM32 PA9
+ * 
+ * LEDs:
+ * - GPIO25: LED1 Rojo
+ * - GPIO4:  LED2 Naranja  
+ * - GPIO2:  LED3 Amarillo
+ * ============================================================================
+ */
+
+#include <Arduino.h>
+#include <ESP32SPISlave.h>
+
+/* ========== PINES ========== */
+#define LED1  25  // Rojo
+#define LED2  4   // Naranja
+#define LED3  2   // Amarillo
+
+/* ========== SPI ========== */
+#define BUFFER_SIZE 32
+ESP32SPISlave slave;
+uint8_t spi_tx_buf[BUFFER_SIZE];
+uint8_t spi_rx_buf[BUFFER_SIZE];
+
+/* ========== PROTOTIPO ========== */
+void ejecutar_led(uint8_t led_num, uint16_t tiempo_ms);
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  
+  Serial.println("\n=================================");
+  Serial.println("ESP32 - 3 LEDs por SPI");
+  Serial.println("=================================");
+
+  /* Configurar LEDs */
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+  digitalWrite(LED1, LOW);
+  digitalWrite(LED2, LOW);
+  digitalWrite(LED3, LOW);
+  Serial.println("LEDs: GPIO25, GPIO4, GPIO2");
+
+  /* Configurar SPI */
+  slave.setDataMode(SPI_MODE0);
+  slave.setQueueSize(1);
+  slave.begin(VSPI);
+  memset(spi_tx_buf, 0, BUFFER_SIZE);
+  memset(spi_rx_buf, 0, BUFFER_SIZE);
+  Serial.println("SPI: MOSI=23, MISO=19, SCK=18, CS=5");
+
+  /* Test LEDs */
+  Serial.println("\nTest LEDs:");
+  digitalWrite(LED1, HIGH); delay(200); digitalWrite(LED1, LOW);
+  Serial.println("  LED1: OK");
+  digitalWrite(LED2, HIGH); delay(200); digitalWrite(LED2, LOW);
+  Serial.println("  LED2: OK");
+  digitalWrite(LED3, HIGH); delay(200); digitalWrite(LED3, LOW);
+  Serial.println("  LED3: OK");
+
+  Serial.println("\n[READY] Esperando comandos...\n");
+}
+
+void loop() {
+  if (slave.available()) {
+    slave.wait(spi_rx_buf, spi_tx_buf, BUFFER_SIZE);
+    
+    uint8_t led_num = spi_rx_buf[0];
+    uint16_t tiempo = (spi_rx_buf[1] << 8) | spi_rx_buf[2];
+    
+    slave.pop();
+    
+    Serial.print("[SPI] LED");
+    Serial.print(led_num);
+    Serial.print(" por ");
+    Serial.print(tiempo);
+    Serial.println("ms");
+    
+    if (led_num >= 1 && led_num <= 3) {
+      ejecutar_led(led_num, tiempo);
+    } else {
+      Serial.println("ERROR: LED invalido");
+    }
+  }
+  delay(10);
+}
+
+void ejecutar_led(uint8_t led_num, uint16_t tiempo_ms) {
+  int pin = 0;
+  
+  switch(led_num) {
+    case 1: pin = LED1; Serial.print("LED1 (Rojo) "); break;
+    case 2: pin = LED2; Serial.print("LED2 (Naranja) "); break;
+    case 3: pin = LED3; Serial.print("LED3 (Amarillo) "); break;
+    default: return;
+  }
+  
+  Serial.println("ON");
+  digitalWrite(pin, HIGH);
+  delay(tiempo_ms);
+  digitalWrite(pin, LOW);
+  Serial.println("OFF\n");
+}
