@@ -1,0 +1,117 @@
+
+============================================================
+PROYECTO 2 - COMUNICACIÓN SERIAL (NUCLEO-F446RE + ESP32 + PC)
+============================================================
+
+// CONFIGURACIÓN INICIAL
+Configurar UART a 115200 baudios (comunicación PC)
+Configurar SPI como MASTER (comunicación ESP32)
+Configurar I2C como MASTER (comunicación ESP32)
+Inicializar LCD 16x2
+Variables:
+  valor_adc = 0
+  valor_voltios = 0.0
+  ultimo_led = 'N'  // N = Ninguno
+
+// PROGRAMA PRINCIPAL (NUCLEO)
+Repetir indefinidamente:
+  Limpiar terminal UART
+  Mostrar en UART:
+    "==== MENÚ PRINCIPAL ===="
+    "1. Controlar LEDs por SPI"
+    "2. Leer sensor por I2C"
+    "Selección: "
+  
+  Leer opcion desde UART
+
+  Si opcion == '1':
+    Llamar funcion_Control_SPI()
+  Si opcion == '2':
+    Llamar funcion_Leer_I2C()
+  Sino:
+    Mostrar "Opción inválida"
+    Esperar 1 segundo
+Fin repetir
+
+// FUNCIÓN CONTROL SPI (NUCLEO)
+funcion_Control_SPI():
+  Mostrar en UART:
+    "== CONTROL DE LEDs =="
+    "Formato: LED,TIME_MS"
+    "Ejemplo: 2,1000 → LED2 por 1s"
+    "Comando: "
+  
+  Leer comando desde UART
+  Enviar comando al ESP32 por SPI
+  Mostrar "Comando enviado"
+  Esperar 1 segundo
+  Regresar
+
+// FUNCIÓN LECTURA I2C (NUCLEO)
+funcion_Leer_I2C():
+  Mostrar "Leyendo sensor..."
+  Enviar solicitud I2C a ESP32 (dirección 0x27)
+  Recibir valor_adc desde ESP32
+  
+  valor_voltios = (valor_adc / 4095) * 3.3
+  Mostrar en UART:
+    "Valor ADC: " + valor_adc + " bits"
+    "Voltaje: " + valor_voltios + " V"
+  
+  Llamar actualizar_LCD(valor_adc, valor_voltios, ultimo_led)
+  Esperar 1 segundo
+  Regresar
+
+// FUNCIÓN LCD (NUCLEO)
+actualizar_LCD(bits, voltios, led):
+  LCD.clear()
+  LCD.setCursor(0,0)
+  LCD.print("ADC:" + bits + " V:" + voltios)
+  LCD.setCursor(0,1)
+  LCD.print("Ult.LED: " + led)
+
+// PROGRAMA ESP32 (SPI SLAVE)
+Configurar SPI como esclavo
+Configurar LEDs en pines GPIO
+ultimo_led = 'N'
+
+Repetir indefinidamente:
+  Si hay datos SPI:
+    comando = recibir_datos_SPI()
+    [num_led, tiempo] = separar(comando, ',')
+    
+    Si num_led == '1': ultimo_led = 'R'
+    Si num_led == '2': ultimo_led = 'G'
+    Si num_led == '3': ultimo_led = 'B'
+    
+    Encender LED[num_led]
+    Esperar tiempo milisegundos
+    Apagar LED[num_led]
+Fin repetir
+
+// PROGRAMA ESP32 (I2C SLAVE)
+Configurar I2C como esclavo (0x27)
+Configurar pin A0 como analógico
+
+Repetir indefinidamente:
+  Si solicitud I2C desde NUCLEO:
+    valor_adc = leer_pin_analogico(A0)
+    enviar_datos_I2C(valor_adc)
+Fin repetir
+
+============================================================
+FLUJO DEL SISTEMA:
+1. PC ↔ NUCLEO (UART): Menú principal
+2. Opción 1: 
+   - Usuario ingresa comando LED (ej: "3,500")
+   - NUCLEO → ESP32 (SPI): Envía comando
+   - ESP32 enciende LED correspondiente
+3. Opción 2:
+   - NUCLEO → ESP32 (I2C): Solicita lectura
+   - ESP32 lee potenciómetro y envía valor
+   - NUCLEO muestra valores en UART y LCD
+4. LCD muestra:
+   - Línea 1: Valor ADC y voltaje
+   - Línea 2: Inicial del último LED activado
+============================================================
+
