@@ -1,0 +1,194 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal.h>
+#include "driver/adc.h"
+
+// ================== I2C (ESCLAVO) ==================
+#define I2C_SLAVE_ADDR 0x08   // Dirección de 7 bits
+
+// ================== LCD (4 bits) ==================
+#define LCD_RS  33
+#define LCD_E   26
+#define LCD_D4  27
+#define LCD_D5  14
+#define LCD_D6  13
+#define LCD_D7  32
+LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+
+// ================== POTENCIOMETRO ==================
+#define POT1    34            // GPIO34 = ADC1_CH6
+#define VREF_mV 3300          // 3.3V en mV
+#define ADC_BITS 12
+#define ADC_MAX  ((1 << ADC_BITS) - 1)
+#define SAMPLES 16            // promedio para suavizar
+
+// ================== LEDS (no usados aquí) ==================
+#define LED_R 25
+#define LED_N 4
+#define LED_A 2
+
+// ================== ESTADO ==================
+volatile bool     g_samplingEnabled = true;     // START por defecto
+volatile uint8_t  g_last8           = 0;        // último valor 0..255
+volatile uint16_t g_last_mV         = 0;        // último voltaje en mV
+volatile bool     g_newCmd          = false;
+volatile uint8_t  g_lastCmd         = 0x01;     // último comando recibido
+
+// ------------------ Prototipos ------------------
+static inline uint16_t readADCmV(void);
+static inline uint8_t  map12to8(uint16_t adc12);
+static inline uint16_t mV_to_adc12(uint16_t mV);
+void updateLCD(uint16_t mV, uint8_t v8);
+void onReceive(int n);
+void onRequest(void);
+
+// ================== UTIL: 12b -> 8b (tu lógica) ==================
+static inline uint8_t to8bits(int v12) {
+  if (v12 < 0) v12 = 0;
+  if (v12 > 4095) v12 = 4095;
+  return (uint8_t)((v12 * 255 + 2047) / 4095);
+}
+
+// ================== SETUP ==================
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  // LCD
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0,0); lcd.print(F("I2C Slave 0x08"));
+  lcd.setCursor(0,1); lcd.print(F("Init..."));
+
+  // LEDs (por si luego los usas)
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_N, OUTPUT);
+  pinMode(LED_A, OUTPUT);
+  digitalWrite(LED_R, LOW);
+  digitalWrite(LED_N, LOW);
+  digitalWrite(LED_A, LOW);
+
+  // ADC
+  analogReadResolution(ADC_BITS);
+  analogSetPinAttenuation(POT1, ADC_11db); // ~0–3.3V
+
+  // Lectura inicial
+  uint16_t mV0   = readADCmV();
+  uint16_t adc12 = mV_to_adc12(mV0);
+  uint8_t  v80   = to8bits(adc12);
+
+  noInterrupts();
+  g_last_mV = mV0;
+  g_last8   = v80;
+  interrupts();
+
+  updateLCD(g_last_mV, g_last8);
+
+  // I2C esclavo
+  Wire.onReceive(onReceive);
+  Wire.onRequest(onRequest);
+  Wire.begin((uint8_t)I2C_SLAVE_ADDR);
+
+  Serial.println(F("ESP32 listo: I2C esclavo 0x08, SDA=21, SCL=22"));
+}
+
+// ================== LOOP ==================
+void loop() {
+  // Procesar comandos I2C fuera de ISR
+  if (g_newCmd) {
+    noInterrupts();
+    uint8_t cmd = g_lastCmd;
+    g_newCmd = false;
+    interrupts();
+
+    if (cmd == 0x01) {
+      g_samplingEnabled = true;   // START
+      Serial.println(F("[CMD] START muestreo"));
+    } else if (cmd == 0x00) {
+      g_samplingEnabled = false;  // STOP
+      Serial.println(F("[CMD] STOP muestreo"));
+    } else {
+      Serial.print(F("[CMD] Desconocido: 0x"));
+      Serial.println(cmd, HEX);
+    }
+  }
+
+  // Muestrear y refrescar LCD cada ~100 ms si está activo
+  static uint32_t tPrev = 0;
+  uint32_t now = millis();
+  if (g_samplingEnabled && (now - tPrev >= 100)) {
+    tPrev = now;
+
+    uint16_t mV    = readADCmV();
+    uint16_t adc12 = mV_to_adc12(mV);
+    uint8_t  v8    = to8bits(adc12);
+
+    noInterrupts();
+    g_last_mV = mV;
+    g_last8   = v8;
+    interrupts();
+
+    updateLCD(mV, v8);
+  }
+
+  delay(2);
+}
+
+// ================== I2C: onReceive ==================
+void onReceive(int n) {
+  while (Wire.available()) {
+    g_lastCmd = Wire.read();  // Guarda el último byte recibido
+  }
+  g_newCmd = true;
+}
+
+// ================== I2C: onRequest ==================
+void onRequest() {
+  uint8_t v;
+  noInterrupts();
+  v = g_last8;
+  interrupts();
+  Wire.write(v);              // Envía 1 byte al maestro
+}
+
+// ================== Lectura de ADC en mV ==================
+static inline uint16_t readADCmV(void) {
+  uint32_t acc = 0;
+  for (int i = 0; i < SAMPLES; ++i) {
+    acc += analogRead(POT1);     // 0..4095
+    delayMicroseconds(200);
+  }
+  uint16_t adc = (uint16_t)(acc / SAMPLES);
+  uint32_t mV  = (uint32_t)adc * VREF_mV / ADC_MAX;
+  if (mV > 65535) mV = 65535;
+  return (uint16_t)mV;
+}
+
+// ================== Helpers de mapeo ==================
+static inline uint8_t map12to8(uint16_t adc12) {
+  return to8bits((int)adc12);
+}
+
+static inline uint16_t mV_to_adc12(uint16_t mV) {
+  // adc12 ≈ mV * (4095 / 3300)
+  uint32_t adc = (uint32_t)mV * ADC_MAX / VREF_mV;
+  if (adc > ADC_MAX) adc = ADC_MAX;
+  return (uint16_t)adc;
+}
+
+// ================== LCD ==================
+void updateLCD(uint16_t mV, uint8_t v8) {
+  float V = mV / 1000.0f;
+
+  // Fila 1: V= x.xx V
+  lcd.setCursor(0,0);
+  char l1[17];
+  snprintf(l1, sizeof(l1), "V= %1.2f V      ", V);
+  lcd.print(l1);
+
+  // Fila 2: ADC=ddd 0xHH
+  lcd.setCursor(0,1);
+  char l2[17];
+  snprintf(l2, sizeof(l2), "ADC=%3u 0x%02X  ", (unsigned)v8, (unsigned)v8);
+  lcd.print(l2);
+}
