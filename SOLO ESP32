@@ -1,0 +1,141 @@
+//PROGRA ESP32
+#include <Arduino.h>  
+#include <LiquidCrystal.h>
+
+// ================== LCD (4 bits) ==================
+#define LCD_RS  33
+#define LCD_E   26
+#define LCD_D4  27
+#define LCD_D5  14
+#define LCD_D6  13
+#define LCD_D7  32
+
+LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+
+// POTENCIOMETRO
+#define POT1 34
+
+// LEDS SPI (Modo 1)
+#define LED_R 25
+#define LED_N 4
+#define LED_A 2
+
+// VARIABLES DE MODO
+uint8_t modo = 0;  // 0 = sin modo, 1 = SPI LEDs, 2 = Sensores
+
+// 12 bits (0-4095) -> 8 bits (0-255)
+static inline uint8_t to8bits(int v12) {
+  if(v12 < 0) v12 = 0;
+  if(v12 > 4095) v12 = 4095;
+  return (uint8_t)((v12 * 255 + 2047) / 4095);
+}
+
+void imprimirMenu() {
+  Serial.println("\n===== MENU PRINCIPAL =====");
+  Serial.println("1 - Modo SPI (Control LEDs)");
+  Serial.println("2 - Modo Sensores (Control del Potenciometro)");
+  Serial.println("==========================");
+  Serial.print("Selecciona opcion: ");
+}
+
+void imprimirEncabezado() {
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Pot1: Pot1: LED:");
+}
+
+void apagarTodos() {
+  digitalWrite(LED_R, LOW);
+  digitalWrite(LED_N, LOW);
+  digitalWrite(LED_A, LOW);
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  lcd.begin(16,2);
+  imprimirMenu();
+
+  pinMode(LED_R, OUTPUT);
+  pinMode(LED_N, OUTPUT);
+  pinMode(LED_A, OUTPUT);
+  apagarTodos();
+}
+
+void ejecutarSPI(char led, int tiempo) {
+  apagarTodos();
+
+  if (led == '1') {
+    digitalWrite(LED_R, HIGH);
+    lcd.setCursor(12,1); lcd.print("R");
+  } else if (led == '2') {
+    digitalWrite(LED_N, HIGH);
+    lcd.setCursor(12,1); lcd.print("N");
+  } else if (led == '3') {
+    digitalWrite(LED_A, HIGH);
+    lcd.setCursor(12,1); lcd.print("A");
+  } else {
+    return; // comando inválido
+  }
+
+  delay(tiempo);
+  apagarTodos();
+  lcd.setCursor(12,1); lcd.print(" ");
+}
+
+void loop() {
+
+  if (Serial.available()) {
+    String entrada = Serial.readStringUntil('\n');
+    entrada.trim();
+
+    if (entrada == "1") {
+      modo = 1;
+      imprimirEncabezado();
+      apagarTodos();
+      Serial.println("\n--- Modo SPI Seleccionado ---");
+      Serial.println("Formato: led,tiempo  ej: 1,500");
+      Serial.println("LED1=Rojo, LED2=Naranja, LED3=Amarillo");
+      return;
+    }
+
+    if (entrada == "2") {
+      modo = 2;
+      imprimirEncabezado();
+      apagarTodos();
+      Serial.println("\n--- Modo Sensores Seleccionado ---");
+      return;
+    }
+
+    if (modo == 1 && entrada.indexOf(',') > 0) {
+      char led = entrada.charAt(0);
+      int tiempo = entrada.substring(2).toInt();
+      ejecutarSPI(led, tiempo);
+      Serial.println("Comando ejecutado.");
+      imprimirMenu();
+      return;
+    }
+  }
+
+  // ================== MODO 2 (Sensores) ==================
+  if (modo == 2) {
+    // Leemos SOLO POT1
+    int pot1_12 = analogRead(POT1);
+
+    // Pot1 en VOLTIOS (0..3.30 V)
+    const float VREF = 3.30f;
+    float p1_volt = (pot1_12 * VREF) / 4095.0f;
+
+    // Pot2 muestra los BITS derivados del mismo POT1
+    uint8_t p1_bits = to8bits(pot1_12);
+
+    Serial.print("Pot1="); Serial.print(p1_volt,2);
+    Serial.print(" V | Pot2(bits, Pot1)="); Serial.println(p1_bits);
+
+    // LCD fila 2: "0.00V  nnn"
+    char linea2[17];
+    snprintf(linea2, sizeof(linea2), "%4.2fV %3u      ", p1_volt, p1_bits);
+    lcd.setCursor(0,1);
+    lcd.print(linea2);
+  }
+}
