@@ -1,8 +1,8 @@
 /**
  * ============================================================================
- * ESP32 - Esclavo Unificado SPI + I2C (Simultáneo)
+ * ESP32 - Esclavo 
  * ============================================================================
- * SPI: Control de 3 LEDs con comando [LED, TIEMPO_H, TIEMPO_L]
+ * SPI: Control de 3 LEDs con comando 
  * I2C: Lectura de potenciómetro, display LCD, comandos START/STOP
  *
  * SPI (VSPI): MOSI=23, MISO=19, SCK=18, CS=5
@@ -21,7 +21,7 @@
 #include "driver/adc.h"
 
 /* ========== I2C ========== */
-#define I2C_SLAVE_ADDR 0x08
+#define I2C_SLAVE_ADDR 0x08 //Dirección del esclavo I2C
 
 /* ========== LCD ========== */
 #define LCD_RS  33
@@ -34,10 +34,10 @@ LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 
 /* ========== POTENCIOMETRO ========== */
 #define POT1     34
-#define VREF_mV  3300
+#define VREF_mV  3300 //voltaje de referencia
 #define ADC_BITS 12
-#define ADC_MAX  ((1 << ADC_BITS) - 1)
-#define SAMPLES  16
+#define ADC_MAX  ((1 << ADC_BITS) - 1) //máximo valor del ADC
+#define SAMPLES  16 
 
 /* ========== SPI ========== */
 static const int PIN_MOSI = 23;
@@ -52,17 +52,17 @@ static const int PIN_SS   = 5;
 
 /* ========== VARIABLES GLOBALES ========== */
 // I2C / ADC
-volatile bool     g_samplingEnabled = true;
-volatile uint8_t  g_last8           = 0;
-volatile uint16_t g_last_mV         = 0;
-volatile bool     g_newCmd          = false;
-volatile uint8_t  g_lastCmd         = 0x01;
+volatile bool     g_samplingEnabled = true;  // Indica si el muestreo del ADC está activo
+volatile uint8_t  g_last8           = 0; // Último valor de 8 bits enviado por I2C
+volatile uint16_t g_last_mV         = 0;  // Último valor en milivoltios leído del potenciómetro
+volatile bool     g_newCmd          = false;  // Bandera para indicar que llegó un nuevo comando I2C
+volatile uint8_t  g_lastCmd         = 0x01;  // Último comando recibido por I2C
 
 // SPI
 TaskHandle_t spiTaskHandle = NULL;
 
 // ÚLTIMO LED ACTIVADO VÍA SPI (0=ninguno, 1=ROJO, 2=NARANJA, 3=AMARILLO)
-volatile uint8_t  g_lastLed        = 0;
+volatile uint8_t  g_lastLed        = 0; //Ultimo led activo
 
 /* ========== PROTOTIPOS ========== */
 static inline uint16_t readADCmV(void);
@@ -111,24 +111,24 @@ void setup() {
 
   /* ========== ADC ========== */
   analogReadResolution(ADC_BITS);
-  analogSetPinAttenuation(POT1, ADC_11db);
+  analogSetPinAttenuation(POT1, ADC_11db); //Para poder leer hasta 3.3V
 
   uint16_t mV0   = readADCmV();
-  uint16_t adc12 = mV_to_adc12(mV0);
-  uint8_t  v80   = to8bits(adc12);
+  uint16_t adc12 = mV_to_adc12(mV0); //Conversión a 12 bits
+  uint8_t  v80   = to8bits(adc12); //Lo reduje a 8 bits
 
   noInterrupts();
   g_last_mV = mV0;
   g_last8   = v80;
-  g_lastLed = 0;    // Ninguno al inicio
+  g_lastLed = 0;    // Ningun ed activo al inicio
   interrupts();
 
   updateLCD(g_last_mV, g_last8);
   Serial.println("[INIT] ADC: GPIO34 configurado");
 
   /* ========== I2C ESCLAVO ========== */
-  Wire.onReceive(onI2CReceive);
-  Wire.onRequest(onI2CRequest);
+  Wire.onReceive(onI2CReceive); // Callback para recibir datos
+  Wire.onRequest(onI2CRequest); // Callback para cuando el master pide datos
   Wire.begin((uint8_t)I2C_SLAVE_ADDR);
   Serial.println("[INIT] I2C: Esclavo 0x08, SDA=21, SCL=22");
 
@@ -144,13 +144,14 @@ void setup() {
   spi_slave_interface_config_t slvcfg = {};
   slvcfg.mode = 0;
   slvcfg.spics_io_num = PIN_SS;
-  slvcfg.queue_size = 3;
+  slvcfg.queue_size = 3; //Tamaño del buffer
   slvcfg.flags = 0;
   slvcfg.post_setup_cb = NULL;
   slvcfg.post_trans_cb = NULL;
 
   gpio_set_pull_mode((gpio_num_t)PIN_SS, GPIO_PULLUP_ONLY);
 
+//Inicializa el periférico SPI en modo esclavo
   esp_err_t e = spi_slave_initialize(VSPI_HOST, &buscfg, &slvcfg, SPI_DMA_DISABLED);
   if (e != ESP_OK) {
     Serial.println("[ERROR] SPI slave init failed");
@@ -202,9 +203,9 @@ void loop() {
   if (g_samplingEnabled && (now - tPrev >= 100)) {
     tPrev = now;
 
-    uint16_t mV    = readADCmV();
-    uint16_t adc12 = mV_to_adc12(mV);
-    uint8_t  v8    = to8bits(adc12);
+    uint16_t mV    = readADCmV();         // Leer potenciómetro
+    uint16_t adc12 = mV_to_adc12(mV);     // Convertir a 12 bits
+    uint8_t  v8    = to8bits(adc12);      // Escalar a 8 bits
 
     noInterrupts();
     g_last_mV = mV;
@@ -224,7 +225,7 @@ void spiTask(void *parameter) {
   Serial.println("[SPI TASK] Iniciada en Core 1");
 
   while(true) {
-    uint8_t rx[3] = {0};
+    uint8_t rx[3] = {0}; //buffer de recepción
     uint8_t tx_dummy[3] = {0};
 
     spi_slave_transaction_t t = {};
@@ -261,10 +262,11 @@ void spiTask(void *parameter) {
 /* CALLBACKS I2C                                                                */
 /* ============================================================================ */
 void onI2CReceive(int n) {
+// Lee los bytes recibidos del master
   while (Wire.available()) {
     g_lastCmd = Wire.read();
   }
-  g_newCmd = true;
+  g_newCmd = true; // Activa bandera de nuevo comando
 }
 
 void onI2CRequest(void) {
@@ -288,13 +290,13 @@ void ejecutar_led(uint8_t led_num, uint16_t tiempo_ms) {
     case 3: pin = LED3; nombre = "AMARILLO"; break;
     default: return;
   }
-
+// Limitar tiempo
   if (tiempo_ms < 1) tiempo_ms = 1;
   if (tiempo_ms > 5000) tiempo_ms = 5000;
 
   // Guardar el último LED activado (para mostrarlo luego en la LCD en modo 2)
   noInterrupts();
-  g_lastLed = led_num;
+  g_lastLed = led_num; //Aqui se guarda el último led activado
   interrupts();
 
   Serial.print("      LED");
@@ -330,7 +332,7 @@ static inline uint8_t to8bits(int v12) {
   if (v12 > 4095) v12 = 4095;
   return (uint8_t)((v12 * 255 + 2047) / 4095);
 }
-
+// Convierte milivoltios 
 static inline uint16_t mV_to_adc12(uint16_t mV) {
   uint32_t adc = (uint32_t)mV * ADC_MAX / VREF_mV;
   if (adc > ADC_MAX) adc = ADC_MAX;
@@ -352,7 +354,7 @@ static inline char led_initial(uint8_t n){
 void updateLCD(uint16_t mV, uint8_t v8) {
   float V = mV / 1000.0f;
 
-  // Copia atómica del último LED
+  // Copia último LED
   uint8_t last;
   noInterrupts();
   last = g_lastLed;
