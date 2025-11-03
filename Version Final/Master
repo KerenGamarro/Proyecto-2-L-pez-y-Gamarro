@@ -9,7 +9,7 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-//inlcuir librerias
+//Se incluyen las librerias
 #include "main.h"
 #include "string.h"
 #include "stdio.h"
@@ -17,11 +17,13 @@
 #include "ctype.h"
 
 /* Private variables ---------------------------------------------------------*/
+//Aquí se crean las estructuras de manejo para SPI, I2C, UART
 SPI_HandleTypeDef hspi1;
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
 
 /* Private function prototypes -----------------------------------------------*/
+//Estas funciones ya nos la da el proyecto configuran el reloj, GPIOS y perifericos
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
@@ -33,25 +35,29 @@ static void MX_USART2_UART_Init(void);
 #define I2C_TIMEOUT        100
 
 /* ========== Variables globales ========== */
+//Se hace usos de la variable para potenciometros y leds (SE DEJO BTN POR EL EJEMPLO DE PABLO)
 uint8_t btnLastState = 0;
 uint8_t btnCurrentState = 0;
 uint8_t ledState = 0;
 
 /* ===================== Helpers UART ===================== */
+// Esta función imprime texto por el puerto UART (usada para mostrar menús y mensajes)
 static void uart_print(const char *s) {
   HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), HAL_MAX_DELAY);
 }
 
+//Aquil leo lo seleccionado en el uart
 static char uart_read_key_filtered(void) {
   uint8_t ch;
   while (1) {
-    if (HAL_UART_Receive(&huart2, &ch, 1, HAL_MAX_DELAY) == HAL_OK) {
+    if (HAL_UART_Receive(&huart2, &ch, 1, HAL_MAX_DELAY) == HAL_OK) { //&huart2 es el puerto; &ch dirección donde se guardará el byte recibido 
       if (ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' || ch == 0x1B) continue;
-      return (char)ch;
+      return (char)ch; //Basicamente aquí el programa espera recibir un carácter por UART2. Si la recepción es correcta, verifica que el no este vacio o tenga un salto de linea.
     }
   }
 }
 
+// Esta función lee una línea completa del UART hasta presionar ENTER
 static void uart_read_line(char *buf, size_t maxlen) {
   size_t idx = 0;
   while (idx < (maxlen - 1)) {
@@ -73,8 +79,9 @@ static void str_trim(char *s) {
 }
 
 /* ================== I2C helper (1 byte) ================== */
+// Esta función envía un comando simple (1 byte) al ESP32 por I2C
 static HAL_StatusTypeDef i2c_send_cmd(uint8_t cmd) {
-  return HAL_I2C_Master_Transmit(&hi2c1, (ESP32_I2C_ADDRESS << 1), &cmd, 1, I2C_TIMEOUT);
+  return HAL_I2C_Master_Transmit(&hi2c1, (ESP32_I2C_ADDRESS << 1), &cmd, 1, I2C_TIMEOUT); //Esta función lo que hace es que envía un solo comando al ESP32 usando I2C
 }
 
 
@@ -89,7 +96,7 @@ static void mostrar_menu_principal(void) {
   uart_print("-------------------------------------\r\n");
   uart_print("Seleccione una opcion (1 o 2): ");
 }
-
+//submenú para controlar LEDS por SPI
 static void mostrar_submenu_spi(void) {
   uart_print("\r\n--- SUB-MENU SPI (Control LEDs) ---\r\n");
   uart_print("Formato: LED,TIEMPOms  ej: 1,500\r\n");
@@ -98,28 +105,32 @@ static void mostrar_submenu_spi(void) {
 }
 
 /* ===================== SPI - Control de LEDs ===================== */
-static HAL_StatusTypeDef spi_send_led_cmd(uint8_t led, uint16_t tiempo_ms) {
-  uint8_t tx[3] = {
+static HAL_StatusTypeDef spi_send_led_cmd(uint8_t led, uint16_t tiempo_ms) { //Esta es a función que envía l ESP32 que LED enciende y or cuanto tiempo
+  uint8_t tx[3] = { //envío 3 bytes (#de led y tiempo)
     led,
     (uint8_t)((tiempo_ms >> 8) & 0xFF),
-    (uint8_t)(tiempo_ms & 0xFF)
+    (uint8_t)(tiempo_ms & 0xFF) //Basicamente hace que el tiempo se escriba en 2 bytes para poderlo enviar completo
   };
-
+// Activo la línea CS (bajo) para empezar la comunicación SPI
   HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_RESET);
   HAL_Delay(2);
-  HAL_StatusTypeDef st = HAL_SPI_Transmit(&hspi1, tx, 3, 100);
+
+//Se envían los datos al ESP32
+  HAL_StatusTypeDef st = HAL_SPI_Transmit(&hspi1, tx, 3, 100); //Ese 3 es la cantidad de bytes
   HAL_Delay(2);
+//Termino la transmisión
   HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_SET);
 
   return st;
 }
 
+// Esta función toma el texto ingresado (ej. "1,500") y lo separa en LED y tiempo
 static int parse_led_cmd(const char *line, uint8_t *out_led, uint16_t *out_ms) {
   char buf[64];
   strncpy(buf, line, sizeof(buf) - 1);
   buf[sizeof(buf) - 1] = '\0';
   str_trim(buf);
-  if (buf[0] == '\0') return -1;
+  if (buf[0] == '\0') return -1; //Significa que es caracter es nulo
 
   char *comma = strchr(buf, ',');
   if (!comma) return -1;
@@ -150,15 +161,17 @@ static void modo_i2c_loop(void) {
   uart_print("Potenciometro ACTIVO solo en esta opcion\r\n");
 
   /* Al entrar: START muestreo en el SLAVE */
+ // Envío un comando START al ESP32 para iniciar el muestreo
   if (i2c_send_cmd(0x01) == HAL_OK) {
     uart_print("[I2C] Master START muestreo\r\n");
   } else {
-    uart_print("[I2C] Master ERROR al enviar START\r\n");
+    uart_print("[I2C] Master ERROR al enviar START\r\n"); //solo para saber si si va bien todo
   }
 
   ledState = 0;
   btnLastState = 0;
 
+//Ciclo principal del I2C
   while (1) {
     /* Verificar si hay tecla presionada para salir */
     uint8_t ch;
@@ -167,16 +180,16 @@ static void modo_i2c_loop(void) {
       break;
     }
 
-    /* Leer botón USER */
+    /Se lee botón USER
     btnCurrentState = HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin);
 
-    /* Detectar flanco de subida */
+    // Se Detecta flanco de subida
     if (btnCurrentState == GPIO_PIN_SET && btnLastState == GPIO_PIN_RESET) {
       HAL_Delay(50);  // Anti-rebote
 
       if (HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin) == GPIO_PIN_SET) {
         /* Toggle LED */
-        ledState = !ledState;
+        ledState = !ledState; //cambio el estado del led
 
         /* Enviar por I2C */
         HAL_StatusTypeDef i2c_status;
@@ -191,7 +204,7 @@ static void modo_i2c_loop(void) {
           sprintf(msg, "[I2C] LED %s\r\n", ledState ? "ENCENDIDO" : "APAGADO");
           uart_print(msg);
 
-          /* LED local */
+          
           HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
         }
         else if (i2c_status == HAL_TIMEOUT) {
@@ -212,7 +225,7 @@ static void modo_i2c_loop(void) {
 
 /* ========================================================================== */
 int main(void)
-{
+{ //Aquí se inicia el reloj y los periféricos
   HAL_Init();
   SystemClock_Config();
 
@@ -236,11 +249,12 @@ int main(void)
 
 
   while (1) {
+//Espero a que el usuario selecione una opción en el UART
     char key = uart_read_key_filtered();
 
     switch (key) {
       case '1': {
-    	  (void)i2c_send_cmd(0x00);
+    	  (void)i2c_send_cmd(0x00); //Se detiene el muestreo si estaba en I2C
         /* ========== MODO SPI (LEDs) ========== */
         uart_print("1\r\n");
         mostrar_submenu_spi();
@@ -273,7 +287,7 @@ int main(void)
       }
 
       case '2': {
-        /* ========== MODO I2C (Sensores + Botón) ========== */
+        /* ========== MODO I2C (Potenciometro) ========== */
         uart_print("2\r\n");
         modo_i2c_loop();
         break;
