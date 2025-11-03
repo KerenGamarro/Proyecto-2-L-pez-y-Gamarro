@@ -1,0 +1,403 @@
+/* USER CODE BEGIN Header Daniela Lopez y Keren Gamarro */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : STM32 Master Unificado - SPI (LEDs) + I2C (Sensores)
+  * @description    : Menú UART para seleccionar modo:
+  *                   Opción 1: Control de 3 LEDs por SPI
+  *                   Opción 2: Lectura de sensores por I2C con botón USER
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+#include "main.h"
+#include "string.h"
+#include "stdio.h"
+#include "stdlib.h"
+#include "ctype.h"
+
+/* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;
+I2C_HandleTypeDef hi2c1;
+UART_HandleTypeDef huart2;
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_SPI1_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART2_UART_Init(void);
+
+/* ========== DEFINICIONES ========== */
+#define ESP32_I2C_ADDRESS  0x08
+#define I2C_TIMEOUT        100
+
+/* ========== Variables globales ========== */
+uint8_t btnLastState = 0;
+uint8_t btnCurrentState = 0;
+uint8_t ledState = 0;
+
+/* ===================== Helpers UART ===================== */
+static void uart_print(const char *s) {
+  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), HAL_MAX_DELAY);
+}
+
+static char uart_read_key_filtered(void) {
+  uint8_t ch;
+  while (1) {
+    if (HAL_UART_Receive(&huart2, &ch, 1, HAL_MAX_DELAY) == HAL_OK) {
+      if (ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t' || ch == 0x1B) continue;
+      return (char)ch;
+    }
+  }
+}
+
+static void uart_read_line(char *buf, size_t maxlen) {
+  size_t idx = 0;
+  while (idx < (maxlen - 1)) {
+    uint8_t ch;
+    if (HAL_UART_Receive(&huart2, &ch, 1, HAL_MAX_DELAY) != HAL_OK) continue;
+    if (ch == '\r') continue;
+    if (ch == '\n') break;
+    buf[idx++] = (char)ch;
+  }
+  buf[idx] = '\0';
+}
+
+static void str_trim(char *s) {
+  size_t start = 0;
+  while (s[start] && isspace((unsigned char)s[start])) start++;
+  if (start) memmove(s, s + start, strlen(s + start) + 1);
+  size_t len = strlen(s);
+  while (len > 0 && isspace((unsigned char)s[len - 1])) s[--len] = '\0';
+}
+
+/* ================== I2C helper (1 byte) ================== */
+static HAL_StatusTypeDef i2c_send_cmd(uint8_t cmd) {
+  return HAL_I2C_Master_Transmit(&hi2c1, (ESP32_I2C_ADDRESS << 1), &cmd, 1, I2C_TIMEOUT);
+}
+
+
+
+/* ===================== Menús ===================== */
+static void mostrar_menu_principal(void) {
+  uart_print("\r\n=====================================\r\n");
+  uart_print("            MENU PRINCIPAL\r\n");
+  uart_print("=====================================\r\n");
+  uart_print("1. Controlar dispositivo SPI\r\n");
+  uart_print("2. Obtener medicion de Sensor I2C\r\n");
+  uart_print("-------------------------------------\r\n");
+  uart_print("Seleccione una opcion (1 o 2): ");
+}
+
+static void mostrar_submenu_spi(void) {
+  uart_print("\r\n--- SUB-MENU SPI (Control LEDs) ---\r\n");
+  uart_print("Formato: LED,TIEMPOms  ej: 1,500\r\n");
+  uart_print("  LED: 1|2|3   TIEMPO: 1..5000 ms\r\n");
+  uart_print("Ingrese comando y presione ENTER: ");
+}
+
+/* ===================== SPI - Control de LEDs ===================== */
+static HAL_StatusTypeDef spi_send_led_cmd(uint8_t led, uint16_t tiempo_ms) {
+  uint8_t tx[3] = {
+    led,
+    (uint8_t)((tiempo_ms >> 8) & 0xFF),
+    (uint8_t)(tiempo_ms & 0xFF)
+  };
+
+  HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_RESET);
+  HAL_Delay(2);
+  HAL_StatusTypeDef st = HAL_SPI_Transmit(&hspi1, tx, 3, 100);
+  HAL_Delay(2);
+  HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_SET);
+
+  return st;
+}
+
+static int parse_led_cmd(const char *line, uint8_t *out_led, uint16_t *out_ms) {
+  char buf[64];
+  strncpy(buf, line, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  str_trim(buf);
+  if (buf[0] == '\0') return -1;
+
+  char *comma = strchr(buf, ',');
+  if (!comma) return -1;
+  *comma = '\0';
+  char *s_led = buf;
+  char *s_ms  = comma + 1;
+
+  str_trim(s_led);
+  str_trim(s_ms);
+
+  long led = strtol(s_led, NULL, 10);
+  if (led < 1 || led > 3) return -1;
+
+  long ms = strtol(s_ms, NULL, 10);
+  if (ms < 1) ms = 1;
+  if (ms > 5000) ms = 5000;
+
+  *out_led = (uint8_t)led;
+  *out_ms  = (uint16_t)ms;
+  return 0;
+}
+
+/* ===================== I2C - Control con botón USER ===================== */
+static void modo_i2c_loop(void) {
+
+
+  uart_print("\r\n--- MODO I2C (Sensores) ---\r\n");
+  uart_print("Potenciometro ACTIVO solo en esta opcion\r\n");
+
+  /* Al entrar: START muestreo en el SLAVE */
+  if (i2c_send_cmd(0x01) == HAL_OK) {
+    uart_print("[I2C] Master START muestreo\r\n");
+  } else {
+    uart_print("[I2C] Master ERROR al enviar START\r\n");
+  }
+
+  ledState = 0;
+  btnLastState = 0;
+
+  while (1) {
+    /* Verificar si hay tecla presionada para salir */
+    uint8_t ch;
+    if (HAL_UART_Receive(&huart2, &ch, 1, 10) == HAL_OK) {
+      uart_print("\r\nMaster Volviendo al menu principal...\r\n");
+      break;
+    }
+
+    /* Leer botón USER */
+    btnCurrentState = HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin);
+
+    /* Detectar flanco de subida */
+    if (btnCurrentState == GPIO_PIN_SET && btnLastState == GPIO_PIN_RESET) {
+      HAL_Delay(50);  // Anti-rebote
+
+      if (HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin) == GPIO_PIN_SET) {
+        /* Toggle LED */
+        ledState = !ledState;
+
+        /* Enviar por I2C */
+        HAL_StatusTypeDef i2c_status;
+        i2c_status = HAL_I2C_Master_Transmit(&hi2c1,
+                                             (ESP32_I2C_ADDRESS << 1),
+                                             &ledState,
+                                             1,
+                                             I2C_TIMEOUT);
+
+        if (i2c_status == HAL_OK) {
+          char msg[50];
+          sprintf(msg, "[I2C] LED %s\r\n", ledState ? "ENCENDIDO" : "APAGADO");
+          uart_print(msg);
+
+          /* LED local */
+          HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, ledState ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        }
+        else if (i2c_status == HAL_TIMEOUT) {
+          uart_print("[I2C] ERROR: Timeout\r\n");
+        }
+        else {
+          uart_print("[I2C] ERROR: Fallo de comunicacion\r\n");
+        }
+
+        HAL_Delay(10);
+      }
+    }
+
+    btnLastState = btnCurrentState;
+    HAL_Delay(10);
+  }
+}
+
+/* ========================================================================== */
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_I2C1_Init();
+  MX_USART2_UART_Init();
+
+  uart_print("\r\n\r\n");
+  uart_print("=====================================\r\n");
+  uart_print("  STM32 - Sistema de Control ESP32\r\n");
+  uart_print("=====================================\r\n");
+  uart_print("Firmware Version 2.0\r\n");
+  uart_print("SPI: Control de 3 LEDs\r\n");
+  uart_print("I2C: Sensores + Toggle LED\r\n");
+  uart_print("=====================================\r\n");
+
+  mostrar_menu_principal();
+
+  (void)i2c_send_cmd(0x00);
+
+
+  while (1) {
+    char key = uart_read_key_filtered();
+
+    switch (key) {
+      case '1': {
+    	  (void)i2c_send_cmd(0x00);
+        /* ========== MODO SPI (LEDs) ========== */
+        uart_print("1\r\n");
+        mostrar_submenu_spi();
+
+        char line[64];
+        uart_read_line(line, sizeof(line));
+        str_trim(line);
+
+        uint8_t led;
+        uint16_t tms;
+        if (parse_led_cmd(line, &led, &tms) != 0) {
+          uart_print("\r\nComando invalido. Use ej: 1,500\r\n");
+        } else {
+          char msg[64];
+          snprintf(msg, sizeof(msg), "\r\nEnviando SPI -> LED=%u, %ums\r\n", led, (unsigned)tms);
+          uart_print(msg);
+
+          HAL_StatusTypeDef st = spi_send_led_cmd(led, tms);
+          if (st == HAL_OK) {
+            uart_print("[SPI] Comando enviado correctamente\r\n");
+            uart_print("Esperando ejecucion en ESP32...\r\n");
+            HAL_Delay(tms + 100);
+            uart_print("Comando ejecutado\r\n");
+          }
+          else {
+            uart_print("[SPI] ERROR al enviar comando\r\n");
+          }
+        }
+        break;
+      }
+
+      case '2': {
+        /* ========== MODO I2C (Sensores + Botón) ========== */
+        uart_print("2\r\n");
+        modo_i2c_loop();
+        break;
+      }
+
+      default:
+        uart_print("\r\nOpcion invalida. Intente de nuevo.\r\n");
+        break;
+    }
+
+    mostrar_menu_principal();
+  }
+}
+
+/* ===================== Configuración del sistema ===================== */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { Error_Handler(); }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK|
+                                RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK) {
+    Error_Handler();
+  }
+}
+
+static void MX_SPI1_Init(void)
+{
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase    = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS         = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_64;
+  hspi1.Init.FirstBit    = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode      = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial  = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK) { Error_Handler(); }
+}
+
+static void MX_I2C1_Init(void)
+{
+  hi2c1.Instance             = I2C1;
+  hi2c1.Init.ClockSpeed      = 100000;
+  hi2c1.Init.DutyCycle       = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1     = 0;
+  hi2c1.Init.AddressingMode  = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2     = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK) { Error_Handler(); }
+}
+
+static void MX_USART2_UART_Init(void)
+{
+  huart2.Instance        = USART2;
+  huart2.Init.BaudRate   = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits   = UART_STOPBITS_1;
+  huart2.Init.Parity     = UART_PARITY_NONE;
+  huart2.Init.Mode       = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl  = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK) { Error_Handler(); }
+}
+
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /* LED local PC7 */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+  GPIO_InitStruct.Pin = LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+
+  /* Botón USER PC13 */
+  GPIO_InitStruct.Pin = BTN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(BTN_GPIO_Port, &GPIO_InitStruct);
+
+  /* Chip Select SPI PA9 */
+  HAL_GPIO_WritePin(ESP32_CS_GPIO_Port, ESP32_CS_Pin, GPIO_PIN_SET);
+  GPIO_InitStruct.Pin = ESP32_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(ESP32_CS_GPIO_Port, &GPIO_InitStruct);
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1) { }
+}
+
+#ifdef  USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  (void)file; (void)line;
+}
+#endif
