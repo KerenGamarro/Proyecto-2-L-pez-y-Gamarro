@@ -1,0 +1,364 @@
+/**
+ * ============================================================================
+ * ESP32 - Esclavo Unificado SPI + I2C (Simultáneo)
+ * ============================================================================
+ * Este programa maneja ambos protocolos al mismo tiempo:
+ * - SPI: Control de 3 LEDs con comando [LED, TIEMPO_H, TIEMPO_L]
+ * - I2C: Lectura de potenciómetro, display LCD, comandos START/STOP
+ * 
+ * Conexiones SPI (VSPI):
+ * - GPIO23 (MOSI) ← STM32 PA7
+ * - GPIO19 (MISO) → STM32 PA6
+ * - GPIO18 (SCK)  ← STM32 PA5
+ * - GPIO5  (CS)   ← STM32 PA9
+ * 
+ * Conexiones I2C:
+ * - GPIO21 (SDA)  ↔ STM32 PB9 + 4.7kΩ pull-up
+ * - GPIO22 (SCL)  ↔ STM32 PB8 + 4.7kΩ pull-up
+ * - Dirección: 0x08
+ * 
+ * LCD (4 bits):
+ * - RS=33, E=26, D4=27, D5=14, D6=13, D7=32
+ * 
+ * Potenciómetro:
+ * - GPIO34 (ADC1_CH6)
+ * 
+ * LEDs:
+ * - GPIO25: LED1 Rojo
+ * - GPIO4:  LED2 Naranja
+ * - GPIO2:  LED3 Amarillo
+ * ============================================================================
+ */
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal.h>
+#include "driver/spi_slave.h"
+#include "driver/gpio.h"
+#include "driver/adc.h"
+
+/* ========== I2C ========== */
+#define I2C_SLAVE_ADDR 0x08
+
+/* ========== LCD ========== */
+#define LCD_RS  33
+#define LCD_E   26
+#define LCD_D4  27
+#define LCD_D5  14
+#define LCD_D6  13
+#define LCD_D7  32
+LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+
+/* ========== POTENCIOMETRO ========== */
+#define POT1    34
+#define VREF_mV 3300
+#define ADC_BITS 12
+#define ADC_MAX  ((1 << ADC_BITS) - 1)
+#define SAMPLES 16
+
+/* ========== SPI ========== */
+static const int PIN_MOSI = 23;
+static const int PIN_MISO = 19;
+static const int PIN_SCLK = 18;
+static const int PIN_SS   = 5;
+
+/* ========== LEDS ========== */
+#define LED1 25  // Rojo
+#define LED2 4   // Naranja
+#define LED3 2   // Amarillo
+
+/* ========== VARIABLES GLOBALES ========== */
+// I2C
+volatile bool     g_samplingEnabled = true;
+volatile uint8_t  g_last8           = 0;
+volatile uint16_t g_last_mV         = 0;
+volatile bool     g_newCmd          = false;
+volatile uint8_t  g_lastCmd         = 0x01;
+
+// SPI
+TaskHandle_t spiTaskHandle = NULL;
+
+/* ========== PROTOTIPOS ========== */
+static inline uint16_t readADCmV(void);
+static inline uint8_t to8bits(int v12);
+static inline uint16_t mV_to_adc12(uint16_t mV);
+void updateLCD(uint16_t mV, uint8_t v8);
+void onI2CReceive(int n);
+void onI2CRequest(void);
+void ejecutar_led(uint8_t led_num, uint16_t tiempo_ms);
+void spiTask(void *parameter);
+
+/* ============================================================================ */
+/* SETUP                                                                        */
+/* ============================================================================ */
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  
+  Serial.println("\n\n=========================================");
+  Serial.println("  ESP32 - Esclavo Unificado SPI + I2C");
+  Serial.println("=========================================");
+
+  /* ========== LCD ========== */
+  lcd.begin(16, 2);
+  lcd.clear();
+  lcd.setCursor(0,0); 
+  lcd.print(F("SPI+I2C Ready"));
+  lcd.setCursor(0,1); 
+  lcd.print(F("Addr: 0x08"));
+  delay(1000);
+
+  /* ========== LEDS ========== */
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+  digitalWrite(LED1, LOW);
+  digitalWrite(LED2, LOW);
+  digitalWrite(LED3, LOW);
+  Serial.println("[INIT] LEDs: GPIO25, GPIO4, GPIO2");
+
+  // Test LEDs
+  digitalWrite(LED1, HIGH); delay(200); digitalWrite(LED1, LOW);
+  digitalWrite(LED2, HIGH); delay(200); digitalWrite(LED2, LOW);
+  digitalWrite(LED3, HIGH); delay(200); digitalWrite(LED3, LOW);
+
+  /* ========== ADC ========== */
+  analogReadResolution(ADC_BITS);
+  analogSetPinAttenuation(POT1, ADC_11db);
+  
+  uint16_t mV0   = readADCmV();
+  uint16_t adc12 = mV_to_adc12(mV0);
+  uint8_t  v80   = to8bits(adc12);
+  
+  noInterrupts();
+  g_last_mV = mV0;
+  g_last8   = v80;
+  interrupts();
+  
+  updateLCD(g_last_mV, g_last8);
+  Serial.println("[INIT] ADC: GPIO34 configurado");
+
+  /* ========== I2C ESCLAVO ========== */
+  Wire.onReceive(onI2CReceive);
+  Wire.onRequest(onI2CRequest);
+  Wire.begin((uint8_t)I2C_SLAVE_ADDR);
+  Serial.println("[INIT] I2C: Esclavo 0x08, SDA=21, SCL=22");
+
+  /* ========== SPI ESCLAVO ========== */
+  spi_bus_config_t buscfg = {};
+  buscfg.mosi_io_num = PIN_MOSI;
+  buscfg.miso_io_num = PIN_MISO;
+  buscfg.sclk_io_num = PIN_SCLK;
+  buscfg.quadwp_io_num = -1;
+  buscfg.quadhd_io_num = -1;
+  buscfg.max_transfer_sz = 3;
+
+  spi_slave_interface_config_t slvcfg = {};
+  slvcfg.mode = 0;
+  slvcfg.spics_io_num = PIN_SS;
+  slvcfg.queue_size = 3;
+  slvcfg.flags = 0;
+  slvcfg.post_setup_cb = NULL;
+  slvcfg.post_trans_cb = NULL;
+
+  gpio_set_pull_mode((gpio_num_t)PIN_SS, GPIO_PULLUP_ONLY);
+
+  esp_err_t e = spi_slave_initialize(VSPI_HOST, &buscfg, &slvcfg, SPI_DMA_DISABLED);
+  if (e != ESP_OK) {
+    Serial.println("[ERROR] SPI slave init failed");
+    while(true){}
+  }
+  Serial.println("[INIT] SPI: Esclavo VSPI, CS=5, SCK=18, MOSI=23, MISO=19");
+
+  /* ========== CREAR TAREA SPI ========== */
+  xTaskCreatePinnedToCore(
+    spiTask,           // Función
+    "SPI_Task",        // Nombre
+    4096,              // Stack size
+    NULL,              // Parámetro
+    1,                 // Prioridad
+    &spiTaskHandle,    // Handle
+    1                  // Core 1
+  );
+
+  Serial.println("\n[READY] Sistema listo - SPI + I2C activos");
+  Serial.println("=========================================\n");
+}
+
+/* ============================================================================ */
+/* LOOP PRINCIPAL (I2C + ADC)                                                   */
+/* ============================================================================ */
+void loop() {
+  /* ========== PROCESAR COMANDOS I2C ========== */
+  if (g_newCmd) {
+    noInterrupts();
+    uint8_t cmd = g_lastCmd;
+    g_newCmd = false;
+    interrupts();
+
+    if (cmd == 0x01) {
+      g_samplingEnabled = true;
+      Serial.println("[I2C CMD] START muestreo");
+    } else if (cmd == 0x00) {
+      g_samplingEnabled = false;
+      Serial.println("[I2C CMD] STOP muestreo");
+    } else {
+      Serial.print("[I2C CMD] Desconocido: 0x");
+      Serial.println(cmd, HEX);
+    }
+  }
+
+  /* ========== MUESTREO ADC Y LCD ========== */
+  static uint32_t tPrev = 0;
+  uint32_t now = millis();
+  if (g_samplingEnabled && (now - tPrev >= 100)) {
+    tPrev = now;
+
+    uint16_t mV    = readADCmV();
+    uint16_t adc12 = mV_to_adc12(mV);
+    uint8_t  v8    = to8bits(adc12);
+
+    noInterrupts();
+    g_last_mV = mV;
+    g_last8   = v8;
+    interrupts();
+
+    updateLCD(mV, v8);
+  }
+
+  delay(2);
+}
+
+/* ============================================================================ */
+/* TAREA SPI (Core 1)                                                           */
+/* ============================================================================ */
+void spiTask(void *parameter) {
+  Serial.println("[SPI TASK] Iniciada en Core 1");
+  
+  while(true) {
+    uint8_t rx[3] = {0};
+    uint8_t tx_dummy[3] = {0};
+    
+    spi_slave_transaction_t t = {};
+    t.length = 3 * 8;
+    t.rx_buffer = rx;
+    t.tx_buffer = tx_dummy;
+
+    esp_err_t err = spi_slave_transmit(VSPI_HOST, &t, portMAX_DELAY);
+    
+    if (err == ESP_OK) {
+      uint8_t led = rx[0];
+      uint16_t tiempo = ((uint16_t)rx[1] << 8) | rx[2];
+      
+      Serial.print("\n[SPI] LED=");
+      Serial.print(led);
+      Serial.print(" tiempo=");
+      Serial.print(tiempo);
+      Serial.println(" ms");
+      
+      if (led >= 1 && led <= 3) {
+        ejecutar_led(led, tiempo);
+      } else {
+        Serial.println("[SPI] ERROR: LED invalido (1-3)");
+      }
+    } else {
+      Serial.print("[SPI] ERROR: ");
+      Serial.println((int)err);
+      delay(10);
+    }
+  }
+}
+
+/* ============================================================================ */
+/* CALLBACKS I2C                                                                */
+/* ============================================================================ */
+void onI2CReceive(int n) {
+  while (Wire.available()) {
+    g_lastCmd = Wire.read();
+  }
+  g_newCmd = true;
+}
+
+void onI2CRequest(void) {
+  uint8_t v;
+  noInterrupts();
+  v = g_last8;
+  interrupts();
+  Wire.write(v);
+}
+
+/* ============================================================================ */
+/* CONTROL DE LEDS                                                              */
+/* ============================================================================ */
+void ejecutar_led(uint8_t led_num, uint16_t tiempo_ms) {
+  int pin = 0;
+  const char* nombre = "";
+  
+  switch (led_num) {
+    case 1: pin = LED1; nombre = "ROJO"; break;
+    case 2: pin = LED2; nombre = "NARANJA"; break;
+    case 3: pin = LED3; nombre = "AMARILLO"; break;
+    default: return;
+  }
+  
+  if (tiempo_ms < 1) tiempo_ms = 1;
+  if (tiempo_ms > 5000) tiempo_ms = 5000;
+  
+  Serial.print("      LED");
+  Serial.print(led_num);
+  Serial.print(" (");
+  Serial.print(nombre);
+  Serial.println(") ON");
+  
+  digitalWrite(pin, HIGH);
+  delay(tiempo_ms);
+  digitalWrite(pin, LOW);
+  
+  Serial.println("      OFF\n");
+}
+
+/* ============================================================================ */
+/* ADC Y CONVERSIONES                                                           */
+/* ============================================================================ */
+static inline uint16_t readADCmV(void) {
+  uint32_t acc = 0;
+  for (int i = 0; i < SAMPLES; ++i) {
+    acc += analogRead(POT1);
+    delayMicroseconds(200);
+  }
+  uint16_t adc = (uint16_t)(acc / SAMPLES);
+  uint32_t mV  = (uint32_t)adc * VREF_mV / ADC_MAX;
+  if (mV > 65535) mV = 65535;
+  return (uint16_t)mV;
+}
+
+static inline uint8_t to8bits(int v12) {
+  if (v12 < 0) v12 = 0;
+  if (v12 > 4095) v12 = 4095;
+  return (uint8_t)((v12 * 255 + 2047) / 4095);
+}
+
+static inline uint16_t mV_to_adc12(uint16_t mV) {
+  uint32_t adc = (uint32_t)mV * ADC_MAX / VREF_mV;
+  if (adc > ADC_MAX) adc = ADC_MAX;
+  return (uint16_t)adc;
+}
+
+/* ============================================================================ */
+/* LCD                                                                          */
+/* ============================================================================ */
+void updateLCD(uint16_t mV, uint8_t v8) {
+  float V = mV / 1000.0f;
+
+  // Fila 1: V= x.xx V
+  lcd.setCursor(0,0);
+  char l1[17];
+  snprintf(l1, sizeof(l1), "V=%1.2fV        ", V);
+  lcd.print(l1);
+
+  // Fila 2: ADC=ddd 0xHH
+  lcd.setCursor(0,1);
+  char l2[17];
+  snprintf(l2, sizeof(l2), "ADC=%3u 0x%02X   ", (unsigned)v8, (unsigned)v8);
+  lcd.print(l2);
+}
