@@ -9,7 +9,7 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
+//inlcuir librerias
 #include "main.h"
 #include "string.h"
 #include "stdio.h"
